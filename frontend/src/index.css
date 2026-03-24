@@ -1,0 +1,53 @@
+/* index.css – Global styles for TimeSync frontend */
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Remove number-input spinners globally (cleaner time-entry UX) */
+@layer base {
+    input[type="number"]::-webkit-outer-spin-button,
+    input[type="number"]::-webkit-inner-spin-button {
+        -webkit-appearance: none;
+        margin: 0;
+    }
+    input[type="number"] {
+        -moz-appearance: textfield;
+    }
+
+    /* Smooth scrolling */
+    html {
+        scroll-behavior: smooth;
+    }
+
+    /* Focus-visible polyfill baseline */
+    :focus:not(:focus-visible) {
+        outline: none;
+    }
+}
+
+/* Select element arrow override */
+@layer components {
+    select {
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+        background-position: right 0.5rem center;
+        background-repeat: no-repeat;
+        background-size: 1.25em 1.25em;
+        padding-right: 2.5rem;
+    }
+}
+
+/* Pulse animation for "syncing" chips */
+@keyframes status-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.4;
+    }
+}
+
+.animate-status-pulse {
+    animation: status-pulse 1.5s ease-in-out infinite;
+}
