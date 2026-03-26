@@ -1,21 +1,33 @@
 // Package maconomy implements the Adapter interface for Deltek Maconomy ERP.
 //
-// Authentication: Maconomy uses a proprietary "Reconnect" scheme.
-//  1. POST /containers/{company}/api/authentication  with X-Basic credentials
-//  2. Parse the reconnect token from the response
-//  3. All subsequent requests use  Authorization: X-Reconnect <token>
+// # Authentication – OIDC Authorization Code Flow
 //
-// Timesheet API: Maconomy exposes timesheets via its Container Web Service.
-// Week timesheet lines live under the "timesheets" container.
+// Maconomy can be configured to delegate authentication to an external OpenID
+// Connect provider (e.g. Microsoft Azure / Entra ID).  When this is the case the
+// login sequence is:
 //
-// Reference: Maconomy RESTful Web Services Programmer's Guide (Deltek, v2.6+)
+//  1. GET  <authRoot>                             – discover available auth schemes
+//     and OpenID provider metadata.
+//  2. Front-end opens a browser popup to the     – user authenticates with Azure.
+//     identity provider's authorization endpoint.
+//  3. Azure redirects the popup back to the      – SPA captures `?code=` and posts
+//     registered redirect URI with `?code=`.       the code to the parent window.
+//  4. Back-end receives the code and constructs:
+//     Authorization: X-OIDC-Code <base64("<redirectURI>:<code>")>
+//     and POSTs it to the Maconomy auth root to obtain a reconnect token.
+//  5. The reconnect token is stored in the in-memory session.  All subsequent
+//     API requests use  Authorization: X-Reconnect <token>.
+//
+// Reference: Maconomy RESTful Web Services Programmer's Guide §4.2.3
 package maconomy
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,27 +37,17 @@ import (
 	"github.com/aiqueneldar/time-sync/backend/internal/models"
 )
 
-// Adapter implements adapters.Adapter for Deltek Maconomy.
+// Adapter implements adapters.Adapter for Deltek Maconomy using OIDC auth.
 type Adapter struct {
-	// BaseURL is the root URL of the Maconomy RESTful web services,
-	// e.g. https://maconomy.example.com/maconomy-restapi
-	BaseURL string
-
-	// Company is the Maconomy company name used in API paths.
-	Company string
-
 	httpClient *http.Client
 }
 
-// New creates a configured Maconomy adapter.
-// baseURL must not have a trailing slash.
-func New(baseURL, company string) *Adapter {
+// New creates a Maconomy adapter.
+// The baseURL and company parameters are accepted for interface compatibility
+// but users supply them per-session via the UI auth fields.
+func New(_, _ string) *Adapter {
 	return &Adapter{
-		BaseURL: strings.TrimRight(baseURL, "/"),
-		Company: company,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
@@ -53,9 +55,11 @@ func New(baseURL, company string) *Adapter {
 
 func (a *Adapter) SystemID() string    { return "maconomy" }
 func (a *Adapter) SystemName() string  { return "Deltek Maconomy" }
-func (a *Adapter) Description() string { return "Deltek Maconomy ERP time-reporting" }
+func (a *Adapter) Description() string { return "Deltek Maconomy ERP – OIDC / Azure login" }
 
-// AuthFields returns the credential fields shown in the frontend login form.
+// AuthFields returns the two fields the UI collects before the OIDC popup.
+// The frontend shows these as a normal form; once submitted the backend
+// discovers the OIDC config and responds with HTTP 202 to trigger the popup.
 func (a *Adapter) AuthFields() []models.AuthField {
 	return []models.AuthField{
 		{
@@ -74,114 +78,187 @@ func (a *Adapter) AuthFields() []models.AuthField {
 			Required:    true,
 			HelpText:    "The Maconomy company identifier used in API paths",
 		},
-		{
-			Key:      "username",
-			Label:    "Username",
-			Type:     models.AuthFieldTypeText,
-			Required: true,
-		},
-		{
-			Key:      "password",
-			Label:    "Password",
-			Type:     models.AuthFieldTypePassword,
-			Required: true,
-		},
 	}
+}
+
+// ─── OIDC discovery types ──────────────────────────────────────────────────
+
+// maconomyAuthDiscovery is the JSON shape returned by GET <authRoot>.
+type maconomyAuthDiscovery struct {
+	Schemes map[string]struct {
+		Name string `json:"name"`
+	} `json:"schemes"`
+	OpenIDProviders []maconomyOIDCProvider `json:"openIDProviders"`
+}
+
+// maconomyOIDCProvider holds the per-provider metadata.
+type maconomyOIDCProvider struct {
+	AuthorizationEndpoint string `json:"authorizationEndpoint"`
+	TokenEndpoint         string `json:"tokenEndpoint"`
+	RedirectURI           string `json:"redirectURI"`
+	ClientID              string `json:"clientID"`
+	Links                 struct {
+		AuthorizationURL *struct {
+			Template string `json:"template"`
+		} `json:"authorization-url"`
+	} `json:"links"`
 }
 
 // ─── Authentication ────────────────────────────────────────────────────────
 
-// authRoot returns the URL for the Authentication Web Service root.
-func (a *Adapter) authRoot(baseURL, company string) string {
-	return fmt.Sprintf("%s/containers/%s/api/authentication", baseURL, company)
-}
-
-// Authenticate performs the Maconomy X-Basic → X-Reconnect token exchange.
+// Authenticate is the unified entry point called by the auth handler.
 //
-// Flow (per Maconomy REST API Programmer's Guide §2.8):
-//  1. GET  <authRoot>  →  may return reconnect info
-//  2. POST <authRoot>  with Authorization: X-Basic <b64(user:pwd)>
-//  3. Extract "Maconomy-Reconnect" from response headers
+// Two distinct invocations:
+//
+//  1. Initial call – fields contains {baseUrl, company} only.
+//     The adapter discovers the OIDC config and returns an *OIDCRequiredError*
+//     so the handler can respond with HTTP 202 and the authorization URL.
+//
+//  2. Code exchange – fields also contains {_oidcCode, _oidcRedirectUri}.
+//     The adapter builds the X-OIDC-Code header and exchanges the code with
+//     Maconomy for a reconnect token.
 func (a *Adapter) Authenticate(ctx context.Context, fields map[string]string) (*models.AuthResult, error) {
 	baseURL := strings.TrimRight(fields["baseUrl"], "/")
 	company := fields["company"]
-	username := fields["username"]
-	password := fields["password"]
 
-	if baseURL == "" || company == "" || username == "" || password == "" {
-		return nil, fmt.Errorf("maconomy: all fields are required")
+	if baseURL == "" || company == "" {
+		return nil, fmt.Errorf("maconomy: baseUrl and company are required")
 	}
 
-	authURL := a.authRoot(baseURL, company)
+	// ── Code exchange (second call) ────────────────────────────────────────
+	if code := fields["_oidcCode"]; code != "" {
+		redirectURI := fields["_oidcRedirectUri"]
+		if redirectURI == "" {
+			return nil, fmt.Errorf("maconomy: _oidcRedirectUri is required for code exchange")
+		}
+		return a.exchangeOIDCCode(ctx, baseURL, company, code, redirectURI)
+	}
 
-	// Step 1: GET the root to initialise the session and obtain any initial
-	// reconnect seed (required since Maconomy 2.6.2).
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
+	// ── Discovery (first call) ─────────────────────────────────────────────
+	return a.discoverAndInitiateOIDC(ctx, baseURL, company)
+}
+
+// discoverAndInitiateOIDC calls the Maconomy auth root, reads the OIDC
+// provider metadata, constructs the authorization URL, and returns an
+// *OIDCRequiredError so the handler can reply HTTP 202 to the frontend.
+func (a *Adapter) discoverAndInitiateOIDC(ctx context.Context, baseURL, company string) (*models.AuthResult, error) {
+	authRoot := fmt.Sprintf("%s/containers/%s/api/authentication", baseURL, company)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authRoot, nil)
 	if err != nil {
-		return nil, fmt.Errorf("maconomy: build auth GET: %w", err)
+		return nil, fmt.Errorf("maconomy: build discovery request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 
-	initResp, err := a.httpClient.Do(req)
+	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("maconomy: auth GET failed: %w", err)
+		return nil, fmt.Errorf("maconomy: discovery request failed – check Maconomy URL: %w", err)
 	}
-	defer initResp.Body.Close()
-	io.Copy(io.Discard, initResp.Body) // drain body
+	defer resp.Body.Close()
 
-	// Step 2: POST with Basic credentials.
-	credentials := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	body, _ := io.ReadAll(resp.Body)
 
-	req, err = http.NewRequestWithContext(ctx, http.MethodPost, authURL, nil)
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("maconomy: discovery returned %d – check baseUrl and company: %s",
+			resp.StatusCode, string(body))
+	}
+
+	var discovery maconomyAuthDiscovery
+	if err := json.Unmarshal(body, &discovery); err != nil {
+		return nil, fmt.Errorf("maconomy: decode discovery response: %w", err)
+	}
+
+	// Confirm OIDC is one of the advertised schemes.
+	if _, ok := discovery.Schemes["x-oidc-code"]; !ok {
+		names := make([]string, 0, len(discovery.Schemes))
+		for k := range discovery.Schemes {
+			names = append(names, k)
+		}
+		return nil, fmt.Errorf(
+			"maconomy: instance does not advertise x-oidc-code; available: %s",
+			strings.Join(names, ", "))
+	}
+
+	if len(discovery.OpenIDProviders) == 0 {
+		return nil, fmt.Errorf("maconomy: no OpenID providers in discovery response")
+	}
+
+	// Use the first provider (Maconomy only ever configures one).
+	provider := discovery.OpenIDProviders[0]
+
+	// Generate a cryptographically random state nonce for CSRF protection.
+	state, err := generateState()
 	if err != nil {
-		return nil, fmt.Errorf("maconomy: build auth POST: %w", err)
+		return nil, fmt.Errorf("maconomy: generate OIDC state: %w", err)
 	}
-	req.Header.Set("Authorization", "X-Basic "+credentials)
+
+	authURL := buildAuthURL(provider, state)
+
+	// Return OIDCRequiredError – the auth handler converts this into HTTP 202.
+	return nil, &models.OIDCRequiredError{
+		AuthURL:     authURL,
+		RedirectURI: provider.RedirectURI,
+		State:       state,
+		BaseURL:     baseURL,
+		Company:     company,
+	}
+}
+
+// exchangeOIDCCode constructs the X-OIDC-Code credential and exchanges it
+// with Maconomy for a reconnect token.
+//
+// Wire format (§4.2.3):
+//
+//	Authorization: X-OIDC-Code <base64("<" + redirectURI + ">:" + code)>
+func (a *Adapter) exchangeOIDCCode(ctx context.Context, baseURL, company, code, redirectURI string) (*models.AuthResult, error) {
+	authRoot := fmt.Sprintf("%s/containers/%s/api/authentication", baseURL, company)
+
+	// Encode the credential:  <redirectURI>:code  →  base64
+	rawCredential := fmt.Sprintf("<%s>:%s", redirectURI, code)
+	encodedCredential := base64.StdEncoding.EncodeToString([]byte(rawCredential))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, authRoot, nil)
+	if err != nil {
+		return nil, fmt.Errorf("maconomy: build code-exchange request: %w", err)
+	}
+	req.Header.Set("Authorization", "X-OIDC-Code "+encodedCredential)
 	req.Header.Set("Accept", "application/json")
 
-	// Carry the reconnect seed from the GET response if present.
-	if seed := initResp.Header.Get("Maconomy-Reconnect"); seed != "" {
-		req.Header.Set("Maconomy-Reconnect", seed)
-	}
-
-	authResp, err := a.httpClient.Do(req)
+	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("maconomy: auth POST failed: %w", err)
+		return nil, fmt.Errorf("maconomy: code-exchange request failed: %w", err)
 	}
-	defer authResp.Body.Close()
+	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(authResp.Body)
+	respBody, _ := io.ReadAll(resp.Body)
 
-	if authResp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("maconomy: authentication failed – check username and password")
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("maconomy: OIDC code rejected – it may have expired or been used already")
 	}
-	if authResp.StatusCode >= 400 {
-		return nil, fmt.Errorf("maconomy: authentication error %d: %s", authResp.StatusCode, string(body))
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("maconomy: code-exchange returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	// Step 3: Extract the reconnect token.
-	reconnectToken := authResp.Header.Get("Maconomy-Reconnect")
+	// Extract the reconnect token from the response header or body.
+	reconnectToken := resp.Header.Get("Maconomy-Reconnect")
 	if reconnectToken == "" {
-		// Some versions embed it in the JSON body.
 		var bodyMap map[string]interface{}
-		if json.Unmarshal(body, &bodyMap) == nil {
+		if json.Unmarshal(respBody, &bodyMap) == nil {
 			if t, ok := bodyMap["reconnectToken"].(string); ok {
 				reconnectToken = t
 			}
 		}
 	}
-
 	if reconnectToken == "" {
-		return nil, fmt.Errorf("maconomy: no reconnect token received – check server version")
+		return nil, fmt.Errorf("maconomy: no reconnect token in code-exchange response")
 	}
 
 	return &models.AuthResult{
-		SystemID:    "maconomy",
-		TokenType:   "reconnect",
+		SystemID:  "maconomy",
+		TokenType: "reconnect",
+		// Reconnect tokens have no explicit expiry; use 8 hours conservatively.
 		AccessToken: reconnectToken,
-		// Maconomy reconnect tokens don't carry explicit expiry;
-		// use a conservative 8-hour window to prompt re-auth.
-		ExpiresAt: time.Now().Add(8 * time.Hour),
+		ExpiresAt:   time.Now().Add(8 * time.Hour),
 		Extra: map[string]string{
 			"baseUrl": baseURL,
 			"company": company,
@@ -189,29 +266,29 @@ func (a *Adapter) Authenticate(ctx context.Context, fields map[string]string) (*
 	}, nil
 }
 
-// RefreshAuth re-authenticates. Maconomy reconnect tokens cannot be refreshed
-// without the original credentials, so we return an error signalling the frontend
-// to re-prompt the user.
+// ─── Token management ──────────────────────────────────────────────────────
+
+// RefreshAuth is not supported: reconnect tokens cannot be refreshed without
+// repeating the full OIDC flow.
 func (a *Adapter) RefreshAuth(_ context.Context, _ *models.AuthResult) (*models.AuthResult, error) {
-	return nil, fmt.Errorf("maconomy: session expired – please log in again")
+	return nil, fmt.Errorf("maconomy: session expired – please log in again via Microsoft")
 }
 
-// ValidateAuth issues a lightweight request to the Maconomy auth endpoint
-// using the reconnect token to check validity.
+// ValidateAuth checks that the reconnect token is still accepted by Maconomy.
 func (a *Adapter) ValidateAuth(ctx context.Context, auth *models.AuthResult) (bool, error) {
 	if auth.IsExpired() {
 		return false, nil
 	}
-
 	baseURL := auth.Extra["baseUrl"]
 	company := auth.Extra["company"]
-	authURL := a.authRoot(baseURL, company)
+	authRoot := fmt.Sprintf("%s/containers/%s/api/authentication", baseURL, company)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authRoot, nil)
 	if err != nil {
 		return false, err
 	}
 	req.Header.Set("Authorization", "X-Reconnect "+auth.AccessToken)
+	req.Header.Set("Maconomy-Reconnect", auth.AccessToken)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := a.httpClient.Do(req)
@@ -220,38 +297,30 @@ func (a *Adapter) ValidateAuth(ctx context.Context, auth *models.AuthResult) (bo
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
-
 	return resp.StatusCode < 400, nil
 }
 
 // ─── Data retrieval ────────────────────────────────────────────────────────
 
-// maconomyTimesheetLine is the raw JSON shape returned by the timesheets container.
-type maconomyTimesheetLine struct {
-	JobNumber    string `json:"jobNumber"`
-	TaskName     string `json:"taskName"`
-	Description  string `json:"description"`
-	ActivityCode string `json:"activityCode"`
-}
-
-// maconomyFilterResponse wraps a paged list of timesheet lines.
 type maconomyFilterResponse struct {
 	Panes struct {
 		Filter struct {
 			Records []struct {
-				Data maconomyTimesheetLine `json:"data"`
+				Data struct {
+					JobNumber    string `json:"jobNumber"`
+					TaskName     string `json:"taskName"`
+					Description  string `json:"description"`
+					ActivityCode string `json:"activityCode"`
+				} `json:"data"`
 			} `json:"records"`
 		} `json:"filter"`
 	} `json:"panes"`
 }
 
-// GetAvailableRows fetches active jobs/tasks from Maconomy's timesheet container.
-// The exact filter URL follows the Container Web Service path convention.
+// GetAvailableRows fetches bookable jobs/tasks from the Maconomy timesheet container.
 func (a *Adapter) GetAvailableRows(ctx context.Context, auth *models.AuthResult) ([]models.SystemRow, error) {
 	baseURL := auth.Extra["baseUrl"]
 	company := auth.Extra["company"]
-
-	// Filter the time sheet lines container for entries the current user can book.
 	url := fmt.Sprintf("%s/containers/%s/timesheets/filter", baseURL, company)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -285,9 +354,7 @@ func (a *Adapter) GetAvailableRows(ctx context.Context, auth *models.AuthResult)
 			Code:        d.JobNumber,
 			Name:        d.TaskName,
 			Description: d.Description,
-			Extra: map[string]string{
-				"activityCode": d.ActivityCode,
-			},
+			Extra:       map[string]string{"activityCode": d.ActivityCode},
 		})
 	}
 	return rows, nil
@@ -295,12 +362,11 @@ func (a *Adapter) GetAvailableRows(ctx context.Context, auth *models.AuthResult)
 
 // ─── Submission ────────────────────────────────────────────────────────────
 
-// maconomyTimesheetPost is the JSON body for creating a timesheet line.
 type maconomyTimesheetPost struct {
 	Data struct {
 		JobNumber    string  `json:"jobNumber"`
 		ActivityCode string  `json:"activityCode,omitempty"`
-		Monday       float64 `json:"numberOf1,omitempty"` // Maconomy names days by index
+		Monday       float64 `json:"numberOf1,omitempty"`
 		Tuesday      float64 `json:"numberOf2,omitempty"`
 		Wednesday    float64 `json:"numberOf3,omitempty"`
 		Thursday     float64 `json:"numberOf4,omitempty"`
@@ -310,13 +376,10 @@ type maconomyTimesheetPost struct {
 	} `json:"data"`
 }
 
-// SubmitEntries posts each time entry to the Maconomy timesheet container.
-// In Maconomy the week is identified by an "instance key" derived from the
-// week-start date.
+// SubmitEntries posts time entries to the Maconomy timesheet container.
 func (a *Adapter) SubmitEntries(ctx context.Context, auth *models.AuthResult, entries []models.SystemTimeEntry) (*models.SubmitResult, error) {
 	baseURL := auth.Extra["baseUrl"]
 	company := auth.Extra["company"]
-
 	result := &models.SubmitResult{SystemID: "maconomy", Success: true}
 
 	for _, entry := range entries {
@@ -325,8 +388,8 @@ func (a *Adapter) SubmitEntries(ctx context.Context, auth *models.AuthResult, en
 
 		var payload maconomyTimesheetPost
 		payload.Data.JobNumber = entry.RowCode
-		if ac, ok := extractActivityCode(entry.RowID); ok {
-			payload.Data.ActivityCode = ac
+		if parts := strings.SplitN(entry.RowID, ":", 2); len(parts) == 2 {
+			payload.Data.ActivityCode = parts[1]
 		}
 		payload.Data.Monday = entry.DailyHours[0]
 		payload.Data.Tuesday = entry.DailyHours[1]
@@ -363,7 +426,8 @@ func (a *Adapter) SubmitEntries(ctx context.Context, auth *models.AuthResult, en
 
 		if resp.StatusCode >= 400 {
 			result.Success = false
-			result.Details = append(result.Details, fmt.Sprintf("submit %s status %d: %s", entry.RowCode, resp.StatusCode, respBody))
+			result.Details = append(result.Details,
+				fmt.Sprintf("submit %s status %d: %s", entry.RowCode, resp.StatusCode, respBody))
 		} else {
 			result.Details = append(result.Details, fmt.Sprintf("submitted %s OK", entry.RowCode))
 		}
@@ -377,20 +441,50 @@ func (a *Adapter) SubmitEntries(ctx context.Context, auth *models.AuthResult, en
 	return result, nil
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+// ─── Internal helpers ──────────────────────────────────────────────────────
 
-// setAuthHeaders attaches the X-Reconnect authorization header to a request.
 func (a *Adapter) setAuthHeaders(req *http.Request, auth *models.AuthResult) {
 	req.Header.Set("Authorization", "X-Reconnect "+auth.AccessToken)
-	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Maconomy-Reconnect", auth.AccessToken)
+	req.Header.Set("Accept", "application/json")
 }
 
-// extractActivityCode parses the activity code from a composite row ID "job:activity".
-func extractActivityCode(rowID string) (string, bool) {
-	parts := strings.SplitN(rowID, ":", 2)
-	if len(parts) == 2 {
-		return parts[1], true
+// buildAuthURL constructs the authorization URL.
+// Prefers the Maconomy-provided template (already contains scope/response_type).
+func buildAuthURL(provider maconomyOIDCProvider, state string) string {
+	if provider.Links.AuthorizationURL != nil && provider.Links.AuthorizationURL.Template != "" {
+		u := strings.ReplaceAll(
+			provider.Links.AuthorizationURL.Template,
+			"{redirect-uri}",
+			provider.RedirectURI,
+		)
+		sep := "&"
+		if !strings.Contains(u, "?") {
+			sep = "?"
+		}
+		return u + sep + "state=" + state
 	}
-	return "", false
+	// Fallback: build manually from endpoint parts.
+	return fmt.Sprintf("%s?client_id=%s&scope=openid&response_type=code&redirect_uri=%s&state=%s",
+		provider.AuthorizationEndpoint, provider.ClientID, provider.RedirectURI, state)
+}
+
+// generateState produces a 32-character cryptographically random hex string
+// used as the OIDC state parameter for CSRF protection.
+func generateState() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", b), nil
+}
+
+// IsOIDCRequiredError returns the typed error if err is an *OIDCRequiredError.
+// Convenience wrapper for callers outside the models package.
+func IsOIDCRequiredError(err error) (*models.OIDCRequiredError, bool) {
+	var oidcErr *models.OIDCRequiredError
+	if errors.As(err, &oidcErr) {
+		return oidcErr, true
+	}
+	return nil, false
 }

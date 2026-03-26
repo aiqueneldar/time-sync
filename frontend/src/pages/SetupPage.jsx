@@ -21,6 +21,7 @@ export default function SetupPage() {
   const { systems, selectedSystems, authStatuses } = state;
 
   const [authModalSystem, setAuthModalSystem] = useState(null); // SystemInfo | null
+  const [oidcPending, setOidcPending] = useState(null); // { authUrl, redirectUri } | null
   const [step, setStep] = useState("select"); // 'select' | 'auth'
 
   // ── Load available systems from backend ──────────────────────────────
@@ -87,10 +88,26 @@ export default function SetupPage() {
     setLoading(`auth_${id}`, true);
     clearError(`auth_${id}`);
     try {
-      const status = await authenticate(id, fields);
-      dispatch({ type: ACTIONS.SET_AUTH_STATUS, payload: status });
+      const result = await authenticate(id, fields);
+
+      // Backend returned 202: OIDC popup required.
+      // Store the auth URL and redirect URI so AuthModal can open the popup.
+      if (result?.status === "oidc_required") {
+        setOidcPending({
+          authUrl: result.authUrl,
+          redirectUri: result.redirectUri,
+        });
+        // Keep the modal open and loading state off while waiting for popup.
+        setLoading(`auth_${id}`, false);
+        return;
+      }
+
+      // Normal success (200): auth complete.
+      dispatch({ type: ACTIONS.SET_AUTH_STATUS, payload: result });
       setAuthModalSystem(null);
+      setOidcPending(null);
     } catch (err) {
+      setOidcPending(null);
       setError(`auth_${id}`, err.message || "Authentication failed");
     } finally {
       setLoading(`auth_${id}`, false);
@@ -347,8 +364,12 @@ export default function SetupPage() {
         isOpen={!!authModalSystem}
         isLoading={modalIsLoading}
         error={modalError}
+        oidcPending={oidcPending}
         onSubmit={handleAuthSubmit}
-        onClose={() => setAuthModalSystem(null)}
+        onClose={() => {
+          setAuthModalSystem(null);
+          setOidcPending(null);
+        }}
       />
     </div>
   );

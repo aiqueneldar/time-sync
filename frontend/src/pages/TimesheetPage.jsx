@@ -39,6 +39,7 @@ export default function TimesheetPage() {
 
   const sseRef = useRef(null); // EventSource reference
   const [authModalSystem, setAuthModalSystem] = React.useState(null);
+  const [oidcPending, setOidcPending] = React.useState(null);
 
   // ── Derived values ────────────────────────────────────────────────────
 
@@ -163,10 +164,21 @@ export default function TimesheetPage() {
     setLoading(`auth_${id}`, true);
     clearError(`auth_${id}`);
     try {
-      const status = await authenticate(id, fields);
-      dispatch({ type: ACTIONS.SET_AUTH_STATUS, payload: status });
+      const result = await authenticate(id, fields);
+      // 202 OIDC flow: keep modal open, show popup UI.
+      if (result?.status === "oidc_required") {
+        setOidcPending({
+          authUrl: result.authUrl,
+          redirectUri: result.redirectUri,
+        });
+        setLoading(`auth_${id}`, false);
+        return;
+      }
+      dispatch({ type: ACTIONS.SET_AUTH_STATUS, payload: result });
       setAuthModalSystem(null);
+      setOidcPending(null);
     } catch (err) {
+      setOidcPending(null);
       setError(`auth_${id}`, err.message || "Authentication failed");
     } finally {
       setLoading(`auth_${id}`, false);
@@ -457,8 +469,12 @@ export default function TimesheetPage() {
             ? state.errors[`auth_${authModalSystem.id}`] || null
             : null
         }
+        oidcPending={oidcPending}
         onSubmit={handleAuthSubmit}
-        onClose={() => setAuthModalSystem(null)}
+        onClose={() => {
+          setAuthModalSystem(null);
+          setOidcPending(null);
+        }}
       />
     </div>
   );

@@ -37,6 +37,12 @@ type Session struct {
 	// Keys are system IDs.  Values are NEVER sent to the browser.
 	Auth map[string]*models.AuthResult
 
+	// OIDCPending holds the in-flight OIDC state for each system while the
+	// user is completing the identity-provider login in a popup window.
+	// Entries are cleared as soon as the code exchange succeeds or the session
+	// expires.  Never serialised or sent to the browser.
+	OIDCPending map[string]*models.OIDCPendingState
+
 	// Timesheet is the latest time-entry data submitted by the user.
 	Timesheet *models.TimesheetInput
 
@@ -56,6 +62,7 @@ func newSession(id string) *Session {
 		CreatedAt:    now,
 		LastSeen:     now,
 		Auth:         make(map[string]*models.AuthResult),
+		OIDCPending:  make(map[string]*models.OIDCPendingState),
 		SyncStatuses: make(map[string]*models.SyncStatus),
 		statusCh:     make(chan models.SyncStatus, 32),
 	}
@@ -73,6 +80,30 @@ func (s *Session) GetAuth(systemID string) *models.AuthResult {
 	s.Mu.RLock()
 	defer s.Mu.RUnlock()
 	return s.Auth[systemID]
+}
+
+// SetOIDCPending stores the in-flight OIDC state for a system.
+// Called by the auth handler after receiving OIDCRequiredError from an adapter.
+func (s *Session) SetOIDCPending(systemID string, state *models.OIDCPendingState) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	s.OIDCPending[systemID] = state
+}
+
+// GetOIDCPending retrieves the in-flight OIDC state for a system, or nil if
+// no OIDC flow is in progress for that system.
+func (s *Session) GetOIDCPending(systemID string) *models.OIDCPendingState {
+	s.Mu.RLock()
+	defer s.Mu.RUnlock()
+	return s.OIDCPending[systemID]
+}
+
+// ClearOIDCPending removes the in-flight OIDC state after a successful (or
+// abandoned) code exchange.
+func (s *Session) ClearOIDCPending(systemID string) {
+	s.Mu.Lock()
+	defer s.Mu.Unlock()
+	delete(s.OIDCPending, systemID)
 }
 
 // SetSyncStatus updates the sync status for a system and broadcasts it to

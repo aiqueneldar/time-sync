@@ -34,7 +34,7 @@ export class ApiError extends Error {
  * @param {string} path   - API path, e.g. '/api/systems'
  * @param {RequestInit} [options]
  * @returns {Promise<any>} Parsed JSON response body
- * @throws {ApiError} on non-2xx responses
+ * @throws {ApiError} on non-2xx responses (except 202 which is returned normally)
  */
 async function request(path, options = {}) {
   const headers = {
@@ -54,19 +54,22 @@ async function request(path, options = {}) {
     credentials: "omit",
   });
 
+  // 202 Accepted is used for the OIDC flow: return the body normally.
+  if (response.status === 202) {
+    return response.json();
+  }
+
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
     try {
       const errBody = await response.json();
       message = errBody.error || errBody.message || message;
     } catch (_) {
-      // Non-JSON error body; use the status text.
       message = response.statusText || message;
     }
     throw new ApiError(response.status, message);
   }
 
-  // 204 No Content and similar responses have no body.
   const contentType = response.headers.get("Content-Type") || "";
   if (contentType.includes("application/json")) {
     return response.json();
