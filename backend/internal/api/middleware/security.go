@@ -103,8 +103,11 @@ func RequireSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionID := r.Header.Get("X-Session-ID")
 		if !isValidSessionID(sessionID) {
-			http.Error(w, `{"error":"missing or invalid X-Session-ID header"}`, http.StatusBadRequest)
-			return
+			sessionID = r.URL.Query().Get("session")
+			if !isValidSessionID(sessionID) {
+				http.Error(w, `{"error":"missing or invalid X-Session-ID header"}`, http.StatusBadRequest)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

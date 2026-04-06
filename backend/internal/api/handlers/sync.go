@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -103,8 +104,12 @@ func (h *SyncHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "streaming not supported")
 		return
 	}
-
-	sess := h.sessions.Get(r.Header.Get("X-Session-ID"))
+	// Session is either in the Header X-Session-ID or as a query parameter named session
+	var sessionID string
+	if sessionID = r.Header.Get("X-Session-ID"); sessionID == "" {
+		sessionID = r.URL.Query().Get("session")
+	}
+	sess := h.sessions.Get(sessionID)
 	if sess == nil {
 		writeError(w, http.StatusUnauthorized, "session not found")
 		return
@@ -143,6 +148,7 @@ func (h *SyncHandler) handleSSE(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, ": heartbeat\n\n")
 			flusher.Flush()
 		}
+		log.Println("SEE sent")
 	}
 }
 

@@ -22,8 +22,11 @@ type Config struct {
 	AllowedOrigins []string
 
 	// Maconomy defaults (can be overridden per-session)
-	MaconomyBaseURL string
-	MaconomyCompany string
+	MaconomyBaseURL          string
+	MaconomyCompany          string
+	MaconomyAPIBasePath      string
+	MaconomyOAUTHClientId    string
+	MaconomyOAUTHRedirectURI string
 }
 
 // Load reads configuration from environment variables, applying defaults
@@ -35,8 +38,11 @@ func Load() *Config {
 		TLSCertFile: getEnv("TLS_CERT_FILE", ""),
 		TLSKeyFile:  getEnv("TLS_KEY_FILE", ""),
 
-		MaconomyBaseURL: getEnv("MACONOMY_BASE_URL", ""),
-		MaconomyCompany: getEnv("MACONOMY_COMPANY", ""),
+		MaconomyBaseURL:          getEnv("MACONOMY_BASE_URL", ""),
+		MaconomyCompany:          getEnv("MACONOMY_COMPANY", ""),
+		MaconomyAPIBasePath:      getEnv("MACONOMY_API_BASEPATH", ""),
+		MaconomyOAUTHClientId:    getEnv("MACONOMY_OAUTH_CLIENT_ID", ""),
+		MaconomyOAUTHRedirectURI: getEnv("MACONOMY_OAUTH_REDIRECT_URI", ""),
 	}
 
 	// Parse CORS origins.

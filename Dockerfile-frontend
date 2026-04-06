@@ -1,14 +1,14 @@
 # ─── Stage 1: Build ──────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:25-alpine AS builder
 
 WORKDIR /app
 
 # Copy dependency manifests first for layer caching.
-COPY package.json package-lock.json* ./
+COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci --prefer-offline
 
 # Copy source and build.
-COPY . .
+COPY --exclude=frontend/package*.json frontend/ ./
 
 # VITE_API_BASE_URL is intentionally left empty so all API requests
 # use relative paths (handled by nginx proxy_pass below).
@@ -17,13 +17,10 @@ ENV VITE_API_BASE_URL=""
 RUN npm run build
 
 # ─── Stage 2: Serve ───────────────────────────────────────────────────────────
-FROM nginx:1.27-alpine
-
-# Remove default nginx config.
-RUN rm /etc/nginx/conf.d/default.conf
+FROM nginx:stable-alpine
 
 # Copy our hardened nginx config.
-COPY nginx.conf /etc/nginx/conf.d/timesync.conf
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy the built SPA.
 COPY --from=builder /app/dist /usr/share/nginx/html
@@ -39,5 +36,5 @@ USER nginx
 
 EXPOSE 80
 
-HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 --start-period=1m \
   CMD wget -qO- http://localhost/health || exit 1

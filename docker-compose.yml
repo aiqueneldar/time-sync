@@ -17,25 +17,15 @@ services:
   # ── Go backend ────────────────────────────────────────────────────────────
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: Dockerfile-backend
+      args:
+        - PORT=8080
     container_name: time-sync-backend
     restart: unless-stopped
 
-    environment:
-      # Server
-      PORT: "8080"
-      TLS_ENABLED: "${TLS_ENABLED:-false}"
-      TLS_CERT_FILE: "${TLS_CERT_FILE:-}"
-      TLS_KEY_FILE: "${TLS_KEY_FILE:-}"
-
-      # CORS – allow the nginx frontend container on port 80 and local dev on 5173.
-      # Adjust ALLOWED_ORIGINS in .env for your production domain.
-      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-http://localhost,http://localhost:80,http://localhost:5173}"
-
-      # Optional Maconomy defaults (users can override per-session in the UI).
-      MACONOMY_BASE_URL: "${MACONOMY_BASE_URL:-}"
-      MACONOMY_COMPANY: "${MACONOMY_COMPANY:-}"
+    env_file:
+      - .env
 
     # TLS cert/key volume mount (used when TLS_ENABLED=true).
     volumes:
@@ -50,18 +40,14 @@ services:
     networks:
       - time-sync-internal
 
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
+    ports:
+      - 8080:8080
 
   # ── React frontend (nginx) ────────────────────────────────────────────────
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: Dockerfile-frontend
     container_name: time-sync-frontend
     restart: unless-stopped
 

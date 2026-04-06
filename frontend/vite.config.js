@@ -41,8 +41,13 @@ export default defineConfig({
     // Chunk splitting: keep vendor separate from app code.
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ["react", "react-dom"],
+        manualChunks(id) {
+          if (
+            id.includes("node_modules/react/") ||
+            id.includes("node_modules/react-dom/")
+          ) {
+            return "react";
+          }
         },
       },
     },

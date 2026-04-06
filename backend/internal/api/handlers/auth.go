@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
@@ -86,9 +87,9 @@ func (h *AuthHandler) handleStatus(w http.ResponseWriter, sess *session.Session,
 // in the request body.
 func (h *AuthHandler) handleAuthenticate(w http.ResponseWriter, r *http.Request, sess *session.Session, adapter adapters.Adapter) {
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
-
+	body, err := io.ReadAll(r.Body)
 	var fields map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+	if err := json.Unmarshal(body, &fields); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}

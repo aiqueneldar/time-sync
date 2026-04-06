@@ -12,6 +12,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -38,7 +41,7 @@ func main() {
 	//  2. Add one line here: registry.Register(mysystem.New(...))
 	registry := adapters.NewRegistry()
 
-	registry.Register(maconomy.New(cfg.MaconomyBaseURL, cfg.MaconomyCompany))
+	registry.Register(maconomy.New(cfg.MaconomyBaseURL, cfg.MaconomyCompany, cfg.MaconomyAPIBasePath, cfg.MaconomyOAUTHClientId, cfg.MaconomyOAUTHRedirectURI))
 	registry.Register(fieldglass.New())
 
 	// ── Infrastructure ────────────────────────────────────────────────────
@@ -61,6 +64,32 @@ func main() {
 
 	// ── Start ─────────────────────────────────────────────────────────────
 	go func() {
+		if len(os.Args) == 2 && os.Args[1] == "-health" {
+			var resp *http.Response
+			var err error
+			if cfg.TLSEnabled {
+				resp, err = http.Get(fmt.Sprintf("https://localhost:%s/health", cfg.Port))
+				if err != nil {
+					os.Exit(1)
+				}
+			} else {
+				resp, err = http.Get(fmt.Sprintf("http://localhost:%s/health", cfg.Port))
+				if err != nil {
+					os.Exit(1)
+				}
+			}
+			var body map[string]string
+			read_body, _ := io.ReadAll(resp.Body)
+			if err = json.Unmarshal(read_body, &body); err == nil {
+				if body["status"] == "ok" {
+					os.Exit(0)
+				}
+			} else {
+				fmt.Println(err)
+				os.Exit(2)
+			}
+			os.Exit(0)
+		}
 		if cfg.TLSEnabled {
 			if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
 				log.Fatal("TLS_ENABLED=true but TLS_CERT_FILE or TLS_KEY_FILE not set")
