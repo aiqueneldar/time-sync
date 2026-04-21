@@ -56,7 +56,6 @@ func (r *Registry) All() []models.SystemInfo {
 			ID:          a.SystemID(),
 			Name:        a.SystemName(),
 			Description: a.Description(),
-			AuthFields:  a.AuthFields(),
 		})
 	}
 	return infos

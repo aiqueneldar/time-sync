@@ -40,7 +40,7 @@ Browser (React SPA)
   │  HTTP/S + X-Session-ID header
   ▼
 nginx (frontend container)
-  │  /api/*  → proxy_pass
+  │  /api/v1/*  → proxy_pass
   ▼
 Go backend (API server)
   ├── Session Store (in-memory, keyed by UUID)
@@ -48,9 +48,7 @@ Go backend (API server)
   │     ├── Maconomy adapter
   │     ├── Fieldglass adapter
   │     └── (your adapter here)
-  └── Sync Engine (goroutine per system)
-        │  SSE stream
-        └──────────────────→ Browser status chips
+  └── Sync Engine (To be Decided)
 ```
 
 **Key design choices:**
@@ -70,7 +68,7 @@ Go backend (API server)
 | System | Auth Method | Status |
 |--------|-------------|--------|
 | **Deltek Maconomy** | Proprietary `X-Reconnect` token | ✅ Included |
-| **SAP Fieldglass** | OAuth 2.0 Client Credentials | ✅ Included |
+| **SAP Fieldglass** | OAuth 2.0 Client Credentials | 🚧 Work in progress |
 | _Your system_ | Any | See [Adding a New System](#adding-a-new-time-reporting-system) |
 
 ---
@@ -115,9 +113,6 @@ The recommended approach for internet-facing deployments is to put a TLS-termina
 #   timesync.example.com {
 #     reverse_proxy frontend:80
 #   }
-
-# Option B – Set TLS_ENABLED=true in .env and mount certs directly into the backend.
-# See .env.example for the exact variables.
 ```
 
 ---
@@ -132,14 +127,11 @@ cd backend
 # Install dependencies
 go mod download
 
-# Run with live reload (uses 'air' watcher – install once with: go install github.com/cosmtrek/air@latest)
+# Run with live reload (uses 'air' watcher – install once with: go install github.com/cosmtrek/air@latest) OPTIONAL
 air
 
 # Or run directly:
-go run ./cmd/server
-
-# Run tests
-go test ./...
+cd backend && go run ./cmd/server
 ```
 
 The backend starts on `http://localhost:8080`.
@@ -199,21 +191,10 @@ func (a *Adapter) SystemID() string    { return "mysystem" }
 func (a *Adapter) SystemName() string  { return "My System" }
 func (a *Adapter) Description() string { return "Short description shown in UI" }
 
-func (a *Adapter) AuthFields() []models.AuthField {
-    return []models.AuthField{
-        { Key: "apiUrl", Label: "API URL", Type: models.AuthFieldTypeURL, Required: true },
-        { Key: "apiKey", Label: "API Key", Type: models.AuthFieldTypePassword, Required: true },
-    }
-}
-
-func (a *Adapter) Authenticate(ctx context.Context, fields map[string]string) (*models.AuthResult, error) {
+func (a *Adapter) Authenticate(c *gin.Context, fields map[string]string) (uuid.UUID, error) {
     // Exchange credentials for a token.
-    // Store the token in the returned AuthResult.
+    // Store the token in the Auth struct and return Auth structs UUID in the in-memory store.
     // NEVER store it anywhere else.
-}
-
-func (a *Adapter) RefreshAuth(ctx context.Context, auth *models.AuthResult) (*models.AuthResult, error) {
-    // Return a fresh AuthResult, or an error if refresh is unsupported.
 }
 
 func (a *Adapter) ValidateAuth(ctx context.Context, auth *models.AuthResult) (bool, error) {
@@ -237,7 +218,7 @@ In `backend/cmd/server/main.go`, add one line:
 registry.Register(mysystem.New())
 ```
 
-That's it. The frontend automatically picks up the new system from `GET /api/systems` and renders the login form using the `authFields` you declared.
+That's it. The frontend automatically picks up the new system from `GET /api/v1/systems`.
 
 Optionally add an icon in `frontend/src/components/SystemSelector/SystemSelector.jsx`:
 
@@ -257,19 +238,14 @@ All configuration is via environment variables. See `.env.example` for the full 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8080` | Backend listen port |
-| `TLS_ENABLED` | `false` | Enable HTTPS on the backend |
-| `TLS_CERT_FILE` | _(empty)_ | Path to TLS certificate PEM |
-| `TLS_KEY_FILE` | _(empty)_ | Path to TLS private key PEM |
 | `ALLOWED_ORIGINS` | `http://localhost,...` | Comma-separated CORS allow-list |
-| `MACONOMY_BASE_URL` | _(empty)_ | Pre-fill Maconomy URL for all users |
-| `MACONOMY_COMPANY` | _(empty)_ | Pre-fill Maconomy company name |
 | `FRONTEND_PORT` | `80` | Host port for the nginx container |
 
 ---
 
 ## Security Design
 
-TimeSync follows OWASP Top 10 guidelines throughout.
+TimeSync tries to follow OWASP Top 10 guidelines throughout.
 
 ### Token / credential handling
 
@@ -332,10 +308,9 @@ timesync/
 │       │   ├── registry.go    # Runtime adapter registry
 │       │   ├── maconomy/      # Deltek Maconomy adapter
 │       │   └── fieldglass/    # SAP Fieldglass adapter
-│       ├── session/           # In-memory session store with TTL eviction
+│       ├── store/             # In-memory session store with TTL eviction
 │       ├── sync/              # Async sync engine
 │       └── api/
-│           ├── router.go      # Route registration
 │           ├── handlers/      # HTTP handler functions
 │           └── middleware/    # Security, CORS, session validation
 │
@@ -370,22 +345,11 @@ timesync/
 
 ## API Reference
 
-All endpoints require the `X-Session-ID` header (UUID v4) except `GET /api/systems` and `GET /health`.
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/systems` | List all registered systems |
-| `GET` | `/api/auth/{systemId}` | Get auth status for a system |
-| `POST` | `/api/auth/{systemId}` | Authenticate with credentials |
-| `DELETE` | `/api/auth/{systemId}` | Log out (remove server-side token) |
-| `GET` | `/api/timesheets/{systemId}/rows` | Fetch bookable rows from a system |
-| `POST` | `/api/sync` | Start async sync (returns 202 Accepted) |
-| `GET` | `/api/sync/status` | **SSE stream** of real-time sync updates |
-| `GET` | `/api/sync/status/poll` | One-shot sync status snapshot (SSE fallback) |
-| `GET` | `/health` | Health check |
+See OpenAPI specification here until such a time it gets incorporated in Gin and rendered as part of the project.
+https://app.swaggerhub.com/apis/aiquen-private/time-sync/v1.1
 
 ---
 
 ## License
 
-MIT
+GPL-V3

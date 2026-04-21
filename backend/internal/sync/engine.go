@@ -13,26 +13,21 @@
 package sync
 
 import (
-	"context"
-	"fmt"
 	"time"
 
 	"github.com/aiqueneldar/time-sync/backend/internal/adapters"
 	"github.com/aiqueneldar/time-sync/backend/internal/models"
-	"github.com/aiqueneldar/time-sync/backend/internal/session"
 )
 
 // Engine coordinates sync jobs across adapter instances.
 type Engine struct {
 	registry *adapters.Registry
-	sessions *session.Store
 }
 
 // New creates a new Engine.
-func New(registry *adapters.Registry, sessions *session.Store) *Engine {
+func New(registry *adapters.Registry) *Engine {
 	return &Engine{
 		registry: registry,
-		sessions: sessions,
 	}
 }
 
@@ -42,99 +37,17 @@ func New(registry *adapters.Registry, sessions *session.Store) *Engine {
 // The input is the full timesheet state from the frontend.  The engine resolves
 // which systems are involved by inspecting the row mappings and the session's
 // authenticated adapters.
-func (e *Engine) Dispatch(sess *session.Session, input *models.TimesheetInput) {
-	// Persist the latest timesheet state in the session.
-	sess.Mu.Lock()
-	sess.Timesheet = input
-	sess.Mu.Unlock()
+func (e *Engine) Dispatch(input *models.TimesheetInput) {
 
-	// Determine which systems have at least one mapped entry.
-	systemEntries := e.buildSystemEntries(input)
-
-	for systemID, entries := range systemEntries {
-		// Only sync systems the user is authenticated with.
-		auth := sess.GetAuth(systemID)
-		if auth == nil {
-			sess.SetSyncStatus(models.SyncStatus{
-				SystemID:  systemID,
-				State:     models.SyncStateError,
-				Message:   "Not authenticated – please log in first",
-				UpdatedAt: time.Now(),
-			})
-			continue
-		}
-
-		adapter, ok := e.registry.Get(systemID)
-		if !ok {
-			continue
-		}
-
-		// Mark as syncing immediately so the UI updates before the goroutine starts.
-		sess.SetSyncStatus(models.SyncStatus{
-			SystemID:  systemID,
-			State:     models.SyncStateSyncing,
-			Message:   fmt.Sprintf("Syncing %d entries to %s…", len(entries), adapter.SystemName()),
-			UpdatedAt: time.Now(),
-		})
-
-		// Copy loop variables for the goroutine closure.
-		sid := systemID
-		ent := entries
-		adp := adapter
-		au := auth
-
-		go e.syncSystem(sess, sid, adp, au, ent)
-	}
 }
 
 // syncSystem performs the actual API call for one system and updates the session status.
 func (e *Engine) syncSystem(
-	sess *session.Session,
 	systemID string,
 	adp adapters.Adapter,
-	auth *models.AuthResult,
+	auth *models.Auth,
 	entries []models.SystemTimeEntry,
 ) {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	// Refresh the token if it has expired.
-	if auth.IsExpired() {
-		refreshed, err := adp.RefreshAuth(ctx, auth)
-		if err != nil {
-			sess.SetSyncStatus(models.SyncStatus{
-				SystemID:  systemID,
-				State:     models.SyncStateError,
-				Message:   fmt.Sprintf("Token expired and refresh failed: %v", err),
-				UpdatedAt: time.Now(),
-			})
-			return
-		}
-		sess.SetAuth(systemID, refreshed)
-		auth = refreshed
-	}
-
-	result, err := adp.SubmitEntries(ctx, auth, entries)
-	if err != nil {
-		sess.SetSyncStatus(models.SyncStatus{
-			SystemID:  systemID,
-			State:     models.SyncStateError,
-			Message:   fmt.Sprintf("Sync failed: %v", err),
-			UpdatedAt: time.Now(),
-		})
-		return
-	}
-
-	state := models.SyncStateSynced
-	if !result.Success {
-		state = models.SyncStateError
-	}
-	sess.SetSyncStatus(models.SyncStatus{
-		SystemID:  systemID,
-		State:     state,
-		Message:   result.Message,
-		UpdatedAt: time.Now(),
-	})
 }
 
 // buildSystemEntries groups time entries by system ID.

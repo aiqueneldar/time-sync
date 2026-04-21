@@ -2,10 +2,10 @@
 package handlers
 
 import (
-	"encoding/json"
 	"net/http"
 
 	"github.com/aiqueneldar/time-sync/backend/internal/adapters"
+	"github.com/gin-gonic/gin"
 )
 
 // SystemsHandler handles GET /api/systems.
@@ -21,32 +21,7 @@ func NewSystemsHandler(registry *adapters.Registry) *SystemsHandler {
 }
 
 // ServeHTTP handles GET /api/systems.
-func (h *SystemsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, `{"error":"method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
+func (h *SystemsHandler) Handler(c *gin.Context) {
 	systems := h.registry.All()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"systems": systems,
-	})
-}
-
-// ─── Shared JSON helper ────────────────────────────────────────────────────
-
-// writeJSON serialises v to JSON and writes it with the given status code.
-// It always sets Content-Type: application/json.
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		// At this point the status has already been sent; log only.
-		_ = err
-	}
-}
-
-// writeError writes a JSON error response.
-func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	c.JSON(http.StatusOK, gin.H{"systems": systems})
 }
