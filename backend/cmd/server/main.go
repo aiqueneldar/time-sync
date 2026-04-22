@@ -49,11 +49,15 @@ func main() {
 
 	systemsH := handlers.NewSystemsHandler(registry)
 	authH := handlers.NewAuthHandler(registry)
-	//timesheetsH := handlers.NewTimesheetsHandler(registry, sessions)
+	timecodesH := handlers.NewTimecodesHandler(registry)
 	//syncH := handlers.NewSyncHandler(sessions, engine)
 
+	//--- Register endpoints and handlers
 	v1.GET("/systems", systemsH.Handler)
-	v1.GET("/auth/:system", authH.HandleStatus)
+	v1.POST("/auth", authH.HandleAuth)
+	v1.GET("/timecodes", timecodesH.GetTimecodes)
+
+	//--- Internal healthcheck handler when running in docker
 	if len(os.Args) == 2 && os.Args[1] == "-health" {
 		ok, err := HealthCheck()
 		if err != nil {
@@ -66,6 +70,7 @@ func main() {
 		}
 	}
 
+	// ── Start up Gin server
 	srv := http.Server{
 		Addr:    fmt.Sprintf(":%s", cfg.Port), // Listen on 0.0.0.0:<PORT>
 		Handler: router,
@@ -77,7 +82,6 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	// ── Start up Gin server
 	go func() {
 		log.Printf("Starting up Time-Sync API server on 0.0.0.0:%s...\n", cfg.Port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

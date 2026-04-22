@@ -20,7 +20,6 @@ func NewSystemsHandler(registry *adapters.Registry) *SystemsHandler {
 	return &SystemsHandler{registry: registry}
 }
 
-// ServeHTTP handles GET /api/systems.
 func (h *SystemsHandler) Handler(c *gin.Context) {
 	systems := h.registry.All()
 	c.JSON(http.StatusOK, gin.H{"systems": systems})

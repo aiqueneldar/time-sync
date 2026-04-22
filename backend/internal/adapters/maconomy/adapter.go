@@ -53,7 +53,7 @@ func New(cfg *config.Config) *Adapter {
 	return &Adapter{
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		accepts: map[string]string{
-			"auth":           "application/vnd.deltek.maconomy.authentication+json; charset=utf-8; version=2.0;",
+			"auth":           "application/vnd.deltek.maconomy.authentication+json; charset=utf-8; version=2.0",
 			"environment":    "application/vnd.deltek.maconomy.environment+json; charset=utf-8; version=2.0",
 			"containers":     "application/vnd.deltek.maconomy.containers-v2+json",
 			"containersv6.1": "application/vnd.deltek.maconomy.containers+json; charset=utf-8; version=6.1",
@@ -74,6 +74,7 @@ func (a *Adapter) Description() string { return "Deltek Maconomy ERP" }
 func (a *Adapter) Authenticate(c *gin.Context, fields map[string]string) (uuid.UUID, error) {
 	// Start to construct Auth object
 	auth := models.Auth{
+		AdapterID: "maconomy",
 		TokenType: "reconnect",
 		ExpiresAt: time.Now().Add(time.Hour * 1),
 		Extra: map[string]string{
@@ -83,14 +84,16 @@ func (a *Adapter) Authenticate(c *gin.Context, fields map[string]string) (uuid.U
 		},
 	}
 	// Get the current user session from the in-memory store, needs some type conversions
-	sessionID, err := c.Cookie("sessionId")
+	sessionID, err := c.Cookie("X-Session-ID")
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, err)
+		return uuid.New(), err
 	}
 	store := store.GetStore()
 	sessionUUID, err := uuid.Parse(sessionID)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, err)
+		return uuid.New(), err
 	}
 	session := store.GetSession(sessionUUID)
 
@@ -103,10 +106,12 @@ func (a *Adapter) Authenticate(c *gin.Context, fields map[string]string) (uuid.U
 		token, err := a.passwordAuth(c.Request.Context(), user, password, fields)
 		if err != nil {
 			c.AbortWithError(http.StatusUnauthorized, err)
+			return uuid.New(), err
 		}
 		auth.AccessToken = token
 	default:
 		c.AbortWithError(http.StatusBadRequest, fmt.Errorf("No acceptable authType found"))
+		return uuid.New(), err
 	}
 
 	return session.NewAuth(auth), nil
@@ -120,7 +125,7 @@ func (a *Adapter) passwordAuth(ctx context.Context, user string, password string
 	}
 	req.SetBasicAuth(user, password)                         // Maconomy specefies this as 'user:pass', in utf-8 and base64 encoded with Basic prepended.
 	req.Header.Set("Maconomy-Authentication", "X-Reconnect") // Maconomys propreartery header for HTTP Reconnect
-	req.Header.Set("Accept", a.accepts["auth"])
+	//req.Header.Set("Accept", a.accepts["auth"])
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		return "", err
@@ -139,22 +144,26 @@ func (a *Adapter) ValidateAuth(c *gin.Context, authID uuid.UUID) (bool, error) {
 	auth, err := getAuthFromSession(c, authID)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, errors.New("No auth session found"))
+		return false, err
 	}
 
 	url := fmt.Sprintf("%s/%s/containers/%s/", auth.Extra["baseURL"], auth.Extra["apiURL"], auth.Extra["company"])
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, url, nil)
 	if err != nil {
 		c.AbortWithError(http.StatusBadRequest, err)
+		return false, err
 	}
 	a.setAuthHeaders(req, auth)
 	req.Header.Set("Accept", a.accepts["containers"])
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
 		c.AbortWithError(http.StatusUnauthorized, err)
+		return false, err
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		c.AbortWithError(http.StatusUnauthorized, err)
+		return false, err
 	}
 	if len(body) > 0 && resp.Header.Get("maconomy-reconnect") != "" {
 		resetToken(resp, auth)
@@ -418,16 +427,28 @@ func resetToken(resp *http.Response, auth *models.Auth) {
 	}
 }
 
-func getAuthFromSession(c *gin.Context, authID uuid.UUID) (*models.Auth, error) {
-	sessionID, err := c.Cookie("sessionId")
+func getSessionUUID(c *gin.Context) (uuid.UUID, error) {
+	sessionID, err := c.Cookie("X-Session-ID")
 	if err != nil {
-		return nil, err
+		return uuid.New(), err
 	}
 	sessionUUID, err := uuid.Parse(sessionID)
 	if err != nil {
+		return uuid.New(), err
+	}
+	return sessionUUID, nil
+}
+
+func getSession(sessionUUID uuid.UUID) *store.Session {
+	return store.GetStore().GetSession(sessionUUID)
+}
+
+func getAuthFromSession(c *gin.Context, authID uuid.UUID) (*models.Auth, error) {
+	sessionUUID, err := getSessionUUID(c)
+	if err != nil {
 		return nil, err
 	}
-	session := store.GetStore().GetSession(sessionUUID)
+	session := getSession(sessionUUID)
 	auth, ok := session.GetAuth(authID)
 	if !ok {
 		return nil, errors.New("No auth session found")

@@ -17,6 +17,7 @@ import (
 // This is stored only in-memory; it is NEVER written to disk or a database.
 type Auth struct {
 	AuthID       uuid.UUID         `json:"authId"`
+	AdapterID    string            `json:"adapterId"`
 	TokenType    string            `json:"tokenType"`    // "bearer" | "reconnect"
 	AccessToken  string            `json:"accessToken"`  // never sent to frontend
 	RefreshToken string            `json:"refreshToken"` // never sent to frontend

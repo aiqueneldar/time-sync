@@ -1,10 +1,11 @@
 package handlers
 
 import (
+	"errors"
+	"log"
 	"net/http"
 
 	"github.com/aiqueneldar/time-sync/backend/internal/adapters"
-	"github.com/aiqueneldar/time-sync/backend/internal/models"
 	"github.com/gin-gonic/gin"
 )
 
@@ -19,23 +20,24 @@ func NewAuthHandler(registry *adapters.Registry) *AuthHandler {
 	return &AuthHandler{registry: registry}
 }
 
-func (h *AuthHandler) HandleStatus(c *gin.Context) {
+func (h *AuthHandler) HandleAuth(c *gin.Context) {
+	var fields map[string]string
+	c.Bind(&fields)
+
+	adapter, ok := h.registry.Get(fields["adapterId"])
+	if !ok {
+		c.AbortWithError(http.StatusBadRequest, errors.New("No adapter found"))
+		log.Print(fields)
+		return
+	}
+
+	authID, err := adapter.Authenticate(c, fields)
+	if err != nil {
+		c.AbortWithStatus(http.StatusUnauthorized)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"authId": authID})
 }
 
 func (h *AuthHandler) HandleLogout(c *gin.Context) {
-}
-
-// HandleAuthenticate covers both the initial credential POST and the OIDC
-// code-exchange POST.  The distinction is made by the presence of _oidcCode
-// in the request body.
-func (h *AuthHandler) HandleAuthenticate(c *gin.Context) {
-}
-
-// storeAuthAndRespond saves the AuthResult in the session and returns a
-// sanitised AuthStatus to the caller (no tokens).
-func (h *AuthHandler) storeAuthAndRespond(
-	w http.ResponseWriter,
-	systemID string,
-	auth *models.Auth,
-) {
 }

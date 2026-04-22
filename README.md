@@ -352,4 +352,4 @@ https://app.swaggerhub.com/apis/aiquen-private/time-sync/v1.1
 
 ## License
 
-GPL-V3
+GPL-3.0 license
